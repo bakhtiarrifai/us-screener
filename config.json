@@ -1,0 +1,7 @@
+{
+  "min_value_traded": 25000000.0,
+  "volume_spike_ratio": 1.5,
+  "ma_window": 20,
+  "min_close_price": 5.0,
+  "top_n": 10
+}

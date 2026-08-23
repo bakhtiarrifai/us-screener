@@ -1,0 +1,24 @@
+# Environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets
+.env
+
+# Data & logs
+*.db
+*.log
+fallback_notifications.log
+screener.log
+screener_dashboard.log
+health_check.log
+data/cache/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

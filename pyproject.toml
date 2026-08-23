@@ -1,0 +1,18 @@
+[project]
+name = "us-screener"
+version = "1.0.0"
+description = "US daily stock screener (S&P 500 + Nasdaq-100 + ETFs) with Telegram notifications, SQLite history, RSI/MACD indicators"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.40",
+    "pandas>=2.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "flask>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
