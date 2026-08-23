@@ -101,11 +101,17 @@ Verifies the systemd timer is active, SQLite has recent data, and the Telegram b
 ## Dashboard
 
 ```bash
+# Standalone US-only dashboard (this repo only)
 python dashboard.py
 # open http://localhost:5000
+
+# Optional: unified IDX + US dashboard with a market toggle button.
+# Requires the idx-screener project checked out next to this one
+# (../idx-screener with its own screener_history.db).
+python unified_dashboard.py --port 5000
 ```
 
-Shows candidate history, per-day candidate counts, and average volume spike per ticker. JSON API at `/api/screenings?days=30&ticker=NVDA`.
+Shows candidate history, per-day candidate counts, and average volume spike per ticker. JSON API at `/api/screenings?days=30&ticker=NVDA` (add `&market=idx` on the unified dashboard).
 
 ## Project Layout
 
@@ -115,7 +121,8 @@ tickers.py          # Universe builder: S&P 500 + Nasdaq-100 (Wikipedia+cache) +
 run.py              # Cross-platform runner (screen + Telegram)
 telegram_sender.py  # Telegram notification with log/email fallback
 run_screener.sh     # Daily wrapper (TZ=America/New_York, healthchecks pings)
-dashboard.py        # Flask web dashboard
+dashboard.py        # Flask web dashboard (standalone, US only)
+unified_dashboard.py # Optional combined IDX + US dashboard with market toggle
 health_check.py     # Daily health verification
 setup_cron.sh       # systemd timer / cron installer
 tests/              # Unit tests

@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
 Simple web dashboard for US Screener candidate history.
-Run: python3 dashboard.py
-Open: http://localhost:5000
+
+Standalone version (US market only). For a combined IDX + US view with
+a market toggle, use unified_dashboard.py instead (requires the
+idx-screener project checked out alongside this one).
+
+Run:  python3 dashboard.py [--port 5000]
+Open: http://localhost:5000  (default) or any port via --port / PORT env
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -16,8 +23,25 @@ from flask import Flask, render_template_string, request
 
 app = Flask(__name__)
 
-PROJECT_DIR = Path(__file__).parent
-DB_PATH = PROJECT_DIR / "screener_history.db"
+US_DIR = Path(__file__).parent
+
+# ---------------------------------------------------------------------------
+# Market registry
+# ---------------------------------------------------------------------------
+MARKETS = {
+    "us": {
+        "label": "US",
+        "flag": "🇺🇸",
+        "title": "US Screener",
+        "db": US_DIR / "screener_history.db",
+        "currency": "$",
+        "price_decimals": 2,
+        "subtitle": "Daily swing-trade candidate history — S&P 500 + Nasdaq-100 + ETFs",
+        "timing": "Previous-day closing data, published 09:00 ET before the US market open",
+        "no_candidate": "No candidates passed the filter this day",
+        "empty": "No data yet. Run the US screener first.",
+    },
+}
 
 
 @dataclass
@@ -28,11 +52,11 @@ class ScreeningStats:
     avg_candidates_per_day: float
 
 
-def get_recent_screenings(days: int = 30, ticker: str | None = None) -> list[dict]:
-    if not DB_PATH.exists():
+def get_recent_screenings(db: Path, days: int = 30, ticker: str | None = None) -> list[dict]:
+    if not db.exists():
         return []
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
 
     cutoff = (date.today() - timedelta(days=days)).isoformat()
@@ -51,11 +75,11 @@ def get_recent_screenings(days: int = 30, ticker: str | None = None) -> list[dic
     return results
 
 
-def get_daily_counts(days: int = 30) -> list[dict]:
-    if not DB_PATH.exists():
+def get_daily_counts(db: Path, days: int = 30) -> list[dict]:
+    if not db.exists():
         return []
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     cursor = conn.execute(
@@ -67,11 +91,11 @@ def get_daily_counts(days: int = 30) -> list[dict]:
     return results
 
 
-def get_ticker_volume_spike(days: int = 30) -> list[dict]:
-    if not DB_PATH.exists():
+def get_ticker_volume_spike(db: Path, days: int = 30) -> list[dict]:
+    if not db.exists():
         return []
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     cursor = conn.execute(
@@ -89,11 +113,21 @@ def get_ticker_volume_spike(days: int = 30) -> list[dict]:
     return results
 
 
-def get_stats() -> ScreeningStats:
-    if not DB_PATH.exists():
+def _count_no_candidate_rows(db: Path) -> int:
+    if not db.exists():
+        return 0
+    conn = sqlite3.connect(db)
+    cursor = conn.execute("SELECT COUNT(*) FROM screenings WHERE ticker = 'NO_CANDIDATE'")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_stats(db: Path) -> ScreeningStats:
+    if not db.exists():
         return ScreeningStats(0, 0, None, 0.0)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db)
     cursor = conn.execute(
         "SELECT COUNT(DISTINCT date) as days, COUNT(*) as total, MAX(date) as latest FROM screenings"
     )
@@ -106,28 +140,18 @@ def get_stats() -> ScreeningStats:
     days = row[0]
     total = row[1]
     latest = row[2]
-    no_candidates = _count_no_candidate_rows()
+    no_candidates = _count_no_candidate_rows(db)
     total_candidates = max(0, total - no_candidates)
     avg = total_candidates / days if days else 0.0
 
     return ScreeningStats(days, total_candidates, latest, avg)
 
 
-def _count_no_candidate_rows() -> int:
-    if not DB_PATH.exists():
-        return 0
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.execute("SELECT COUNT(*) FROM screenings WHERE ticker = 'NO_CANDIDATE'")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
-
-
-def get_unique_tickers() -> list[str]:
-    if not DB_PATH.exists():
+def get_unique_tickers(db: Path) -> list[str]:
+    if not db.exists():
         return []
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(db)
     cursor = conn.execute("SELECT DISTINCT ticker FROM screenings ORDER BY ticker")
     tickers = [row[0] for row in cursor.fetchall() if row[0] != "NO_CANDIDATE"]
     conn.close()
@@ -140,7 +164,7 @@ DASHBOARD_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>US Screener Dashboard</title>
+    <title>Screener Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
     <style>
         :root {
@@ -151,6 +175,7 @@ DASHBOARD_TEMPLATE = """
             --accent: #10b981;
             --danger: #ef4444;
             --warning: #f59e0b;
+            --border: #334155;
         }
         * { box-sizing: border-box; }
         body {
@@ -163,11 +188,36 @@ DASHBOARD_TEMPLATE = """
         .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
         h1 { margin-bottom: 0.5rem; }
         .subtitle { color: var(--muted); margin-bottom: 0.25rem; }
+
+        .market-toggle {
+            display: inline-flex;
+            gap: 0;
+            margin: 1rem 0 0.5rem 0;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .market-toggle a {
+            padding: 0.6rem 1.5rem;
+            text-decoration: none;
+            color: var(--muted);
+            background: var(--card);
+            font-weight: 600;
+            font-size: 1rem;
+            transition: background 0.15s, color 0.15s;
+        }
+        .market-toggle a:not(:last-child) { border-right: 1px solid var(--border); }
+        .market-toggle a:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+        .market-toggle a.active {
+            background: var(--accent);
+            color: #000;
+        }
+
         .stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
             gap: 1rem;
-            margin: 2rem 0;
+            margin: 1.5rem 0 2rem 0;
         }
         .stat-card {
             background: var(--card);
@@ -188,7 +238,7 @@ DASHBOARD_TEMPLATE = """
         .controls select, .controls input {
             background: var(--card);
             color: var(--text);
-            border: 1px solid #334155;
+            border: 1px solid var(--border);
             padding: 0.5rem 0.75rem;
             border-radius: 6px;
         }
@@ -223,8 +273,8 @@ DASHBOARD_TEMPLATE = """
             overflow: hidden;
         }
         th, td { padding: 1rem; text-align: left; white-space: nowrap; }
-        th { background: #334155; color: var(--muted); font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; }
-        tr:not(:last-child) td { border-bottom: 1px solid #334155; }
+        th { background: var(--border); color: var(--muted); font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        tr:not(:last-child) td { border-bottom: 1px solid var(--border); }
         tr:hover { background: rgba(255,255,255,0.03); }
         .up { color: var(--accent); }
         .down { color: var(--danger); }
@@ -239,9 +289,16 @@ DASHBOARD_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>📊 US Screener Dashboard</h1>
-        <p class="subtitle">Daily swing-trade candidate history — S&P 500 + Nasdaq-100 + ETFs</p>
-        <p class="subtitle">Previous-day closing data, published 09:00 ET before the US market open</p>
+        <h1>📊 {{ market.title }} Dashboard</h1>
+        <p class="subtitle">{{ market.subtitle }}</p>
+        <p class="subtitle">{{ market.timing }}</p>
+
+        <div class="market-toggle">
+            {% for key, m in markets.items() %}
+            <a href="/?market={{ key }}&days={{ days }}{% if ticker %}&ticker={{ ticker }}{% endif %}"
+               class="{{ 'active' if key == market_key else '' }}">{{ m.flag }} {{ m.label }}</a>
+            {% endfor %}
+        </div>
 
         <div class="stats">
             <div class="stat-card">
@@ -263,6 +320,7 @@ DASHBOARD_TEMPLATE = """
         </div>
 
         <form method="GET" class="controls">
+            <input type="hidden" name="market" value="{{ market_key }}">
             <label for="days">Period:</label>
             <select name="days" id="days">
                 <option value="7" {{ "selected" if days == 7 else "" }}>7 days</option>
@@ -315,32 +373,32 @@ DASHBOARD_TEMPLATE = """
                 <tr style="opacity: 0.7; background: rgba(255,255,255,0.02);">
                     <td>{{ row.date }}</td>
                     <td colspan="9" style="text-align: center; color: var(--muted); font-style: italic;">
-                        No candidates passed the filter this day
+                        {{ market.no_candidate }}
                     </td>
                 </tr>
                 {% else %}
                 <tr>
                     <td>{{ row.date }}</td>
                     <td><strong>{{ row.ticker }}</strong></td>
-                    <td>${{ "{:,.2f}".format(row.close) }}</td>
+                    <td>{{ fmt_price(row.close) }}</td>
                     <td class="{{ 'up' if row.volume_spike >= 1.5 else 'muted' }}">{{ "{:.2f}x".format(row.volume_spike) }}</td>
-                    <td>${{ "{:,.2f}".format(row.ma20) }}</td>
+                    <td>{{ fmt_price(row.ma20) }}</td>
                     <td>{{ "{:.1f}".format(row.rsi14) if row.rsi14 else "-" }}</td>
                     <td>
                         {% if row.entry_zone_low and row.entry_zone_high %}
-                        ${{ "{:,.2f}".format(row.entry_zone_low) }} - ${{ "{:,.2f}".format(row.entry_zone_high) }}
+                        {{ fmt_price(row.entry_zone_low) }} - {{ fmt_price(row.entry_zone_high) }}
                         {% else %}
                         -
                         {% endif %}
                     </td>
-                    <td class="down">{{ "${:,.2f}".format(row.stop_loss) if row.stop_loss else "-" }}</td>
-                    <td class="up">{{ "${:,.2f}".format(row.target_profit) if row.target_profit else "-" }}</td>
+                    <td class="down">{{ fmt_price(row.stop_loss) if row.stop_loss else "-" }}</td>
+                    <td class="up">{{ fmt_price(row.target_profit) if row.target_profit else "-" }}</td>
                     <td>{{ "1:{:.1f}".format(row.risk_reward) if row.risk_reward else "-" }}</td>
                 </tr>
                 {% endif %}
                 {% else %}
                 <tr>
-                    <td colspan="10" style="text-align:center; color: var(--muted);">No data yet. Run the screener first.</td>
+                    <td colspan="10" style="text-align:center; color: var(--muted);">{{ market.empty }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -405,28 +463,48 @@ DASHBOARD_TEMPLATE = """
 """
 
 
+def _resolve_market(key: str | None) -> tuple[str, dict]:
+    key = (key or "us").lower()
+    if key not in MARKETS:
+        key = "us"
+    return key, MARKETS[key]
+
+
 @app.route("/")
 def index():
+    market_key, market = _resolve_market(request.args.get("market"))
+
     try:
         days = int(request.args.get("days", 30))
     except ValueError:
         days = 30
 
     ticker = request.args.get("ticker", "").strip().upper() or None
-    screenings = get_recent_screenings(days=days, ticker=ticker)
-    stats = get_stats()
-    tickers = get_unique_tickers()
+    db = market["db"]
 
-    daily = get_daily_counts(days=days)
+    screenings = get_recent_screenings(db, days=days, ticker=ticker)
+    stats = get_stats(db)
+    tickers = get_unique_tickers(db)
+
+    daily = get_daily_counts(db, days=days)
     daily_labels = [d["date"][-5:] for d in daily]  # MM-DD
     daily_counts = [d["count"] for d in daily]
 
-    spike_data = get_ticker_volume_spike(days=days)
+    spike_data = get_ticker_volume_spike(db, days=days)
     spike_labels = [d["ticker"] for d in spike_data]
     spike_values = [round(d["avg_spike"], 2) for d in spike_data]
 
+    currency = market["currency"]
+    decimals = market["price_decimals"]
+
+    def fmt_price(value: float) -> str:
+        return f"{currency}{value:,.{decimals}f}"
+
     return render_template_string(
         DASHBOARD_TEMPLATE,
+        markets=MARKETS,
+        market_key=market_key,
+        market=market,
         stats=stats,
         screenings=screenings,
         tickers=tickers,
@@ -436,20 +514,31 @@ def index():
         daily_counts=daily_counts,
         spike_labels=spike_labels,
         spike_values=spike_values,
+        fmt_price=fmt_price,
     )
 
 
 @app.route("/api/screenings")
 def api_screenings():
+    market_key, market = _resolve_market(request.args.get("market"))
+
     try:
         days = int(request.args.get("days", 30))
     except ValueError:
         days = 30
 
     ticker = request.args.get("ticker", "").strip().upper() or None
-    screenings = get_recent_screenings(days=days, ticker=ticker)
-    return {"screenings": screenings, "count": len(screenings)}
+    screenings = get_recent_screenings(market["db"], days=days, ticker=ticker)
+    return {"market": market_key, "screenings": screenings, "count": len(screenings)}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Unified IDX + US screener dashboard")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 5000)))
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    args = parser.parse_args()
+    app.run(host=args.host, port=args.port, debug=False)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    main()

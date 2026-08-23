@@ -54,15 +54,23 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+    # Dashboard: unified IDX+US if idx-screener exists alongside, else standalone US
+    DASHBOARD_SCRIPT="dashboard.py"
+    DASHBOARD_DESC="US Screener Dashboard (Flask)"
+    if [ -d "$SCRIPT_DIR/../idx-screener" ]; then
+        DASHBOARD_SCRIPT="unified_dashboard.py"
+        DASHBOARD_DESC="Unified IDX+US Screener Dashboard (Flask)"
+    fi
+
     cat > "$HOME/.config/systemd/user/us-screener-dashboard.service" <<EOF
 [Unit]
-Description=US Screener Dashboard (Flask)
+Description=$DASHBOARD_DESC
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=$SCRIPT_DIR
-ExecStart=$SCRIPT_DIR/.venv/bin/python $SCRIPT_DIR/dashboard.py
+ExecStart=$SCRIPT_DIR/.venv/bin/python $SCRIPT_DIR/$DASHBOARD_SCRIPT --port 5000
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:$SCRIPT_DIR/screener_dashboard.log
