@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import sqlite3
 import sys
@@ -262,12 +263,13 @@ def calculate_metrics(df: pd.DataFrame, config: ScreenerConfig) -> list[StockMet
         volume = int(latest["Volume"])
         value_traded = close * volume
 
-        past = group.iloc[:-config.ma_window]
-        if len(past) < config.ma_window:
+        # [upgrade-2026-11] fix: rata-rata volume = 20 hari SEBELUM hari sinyal; MA20 = 20 close terakhir.
+        prev = group.iloc[:-1]
+        if len(prev) < config.ma_window:
             continue
 
-        avg_volume_20d = float(past["Volume"].tail(config.ma_window).mean())
-        ma20 = float(past["Close"].tail(config.ma_window).mean())
+        avg_volume_20d = float(prev["Volume"].tail(config.ma_window).mean())
+        ma20 = float(group["Close"].tail(config.ma_window).mean())
         volume_spike = volume / avg_volume_20d if avg_volume_20d > 0 else 0.0
 
         close_series = group["Close"]
@@ -449,10 +451,23 @@ def _migrate_db(db_path: str | Path) -> None:
             "stop_loss": "REAL",
             "target_profit": "REAL",
             "risk_reward": "REAL",
+            "strategy": "TEXT",  # [upgrade-2026-11]
         }
         for col, col_type in new_columns.items():
             if col not in columns:
                 conn.execute(f"ALTER TABLE screenings ADD COLUMN {col} {col_type}")
+        conn.commit()
+
+
+# [upgrade-2026-11] Tag strategi & penjaga data basi (hari libur).
+def _date_already_saved(db_path, date: str) -> bool:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT 1 FROM screenings WHERE date = ? LIMIT 1", (date,)).fetchone() is not None
+
+
+def _tag_strategy(db_path, date: str, strategy: str) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE screenings SET strategy = ? WHERE date = ? AND strategy IS NULL", (strategy, date))
         conn.commit()
 
 
@@ -461,23 +476,35 @@ def run_screener(
     config: ScreenerConfig,
     period: str = "90d",
     store: HistoryStore | None = None,
+    strategy: str = "legacy-fixed",  # [upgrade-2026-11]
 ) -> dict:
     """Run the screener pipeline and return results as a dictionary."""
-    df = fetch_prices(tickers, period=period)
-    metrics = calculate_metrics(df, config)
-    candidates = filter_candidates(metrics, config)
+    # [upgrade-2026-11] t1 butuh ±2 tahun data untuk MA200
+    df = fetch_prices(tickers, period="2y" if strategy == "t1" else period)
+    if strategy == "t1":
+        candidates = t1_candidates(df, config)
+    else:
+        metrics = calculate_metrics(df, config)
+        candidates = filter_candidates(metrics, config)
     latest_date = pd.to_datetime(df["Date"]).max().date().isoformat() if not df.empty else None
 
     candidate_dicts = [asdict(m) for m in candidates]
 
-    if store and latest_date:
+    stale = bool(store and latest_date and _date_already_saved(store.db_path, latest_date))  # [upgrade-2026-11]
+    if stale:
+        logger.warning("Data %s sudah tersimpan (bursa libur / data belum diperbarui) — tidak disimpan ulang.", latest_date)
+        candidate_dicts = []
+    elif store and latest_date:
         store.save(latest_date, candidate_dicts)
+        _tag_strategy(store.db_path, latest_date, strategy)
         logger.info("Saved %d candidates to SQLite.", len(candidate_dicts))
 
     return {
         "date": latest_date,
+        "strategy": strategy,
+        "stale": stale,
         "candidates": candidate_dicts,
-        "total_candidates": len(candidates),
+        "total_candidates": len(candidate_dicts),
         "universe_size": len(tickers),
         "filters": {
             "min_value_traded": config.min_value_traded,
@@ -505,6 +532,8 @@ def main() -> int:
     parser.add_argument("--config", type=str, default=None, help="Path to JSON config file")
     parser.add_argument("--output", type=str, choices=["text", "json"], default="text")
     parser.add_argument("--save-history", action="store_true", default=True)
+    parser.add_argument("--strategy", choices=["t1", "legacy-fixed"] if "us" == "idx" else ["legacy-fixed"],
+                        default=os.environ.get("SCREENER_STRATEGY", "legacy-fixed"))  # [upgrade-2026-11]
     parser.add_argument("--no-save-history", action="store_true")
     args = parser.parse_args()
 
@@ -534,7 +563,7 @@ def main() -> int:
     if store:
         _migrate_db(store.db_path)
 
-    result = run_screener(tickers, config, period=args.period, store=store)
+    result = run_screener(tickers, config, period=args.period, store=store, strategy=args.strategy)
 
     if args.output == "json":
         print(json.dumps(result, indent=2, default=str))

@@ -43,6 +43,9 @@ def _format_value(value: float) -> str:
 def build_message(result: dict) -> str:
     date = result.get("date") or "Today"
     candidates = result.get("candidates", [])
+    if result.get("stale"):  # [upgrade-2026-11]
+        return (f"📅 *Screener — {date}*\n\nData bursa belum diperbarui (libur bursa atau data terlambat). "
+                "Tidak ada sinyal baru hari ini.")
     universe_size = result.get("universe_size")
 
     if not candidates:
